@@ -9,7 +9,6 @@ Statistics must be computed on TRAIN SET ONLY.
 """
 
 import pandas as pd
-from typing import Dict
 
 
 def compute_normalization_stats(df):
@@ -19,16 +18,6 @@ def compute_normalization_stats(df):
         - flux_err
         - redshift
         - ebv
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Training dataframe containing all objects.
-
-    Returns
-    -------
-    Dict[str, float]
-        Dictionary of normalization statistics.
     """
 
     stats = {}
