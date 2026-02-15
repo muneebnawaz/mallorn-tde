@@ -1,41 +1,30 @@
-"""
-Normalization utilities for lightcurve dataset.
-
-This module computes global normalization statistics
-for flux, flux_err, redshift, and EBV.
-
-IMPORTANT:
-Statistics must be computed on TRAIN SET ONLY.
-"""
-
-import pandas as pd
+import numpy as np
 
 
-def compute_normalization_stats(df):
+def compute_normalization_stats(df, per_spectrum=False, eps=1e-8):
     """
-    Compute global mean and standard deviation for:
-        - flux
-        - flux_err
-        - redshift
-        - ebv
+    per_spectrum set False by default. Per-spectrum normalization to by consciously selected.
     """
-
     stats = {}
 
-    # Flux statistics
-    stats["flux_mean"] = df["flux"].mean()
-    stats["flux_std"] = df["flux"].std()
+    if per_spectrum:
+        # Each row contains flux array for one spectrum
+        stats["flux_mean"] = df["flux"].apply(np.mean)
+        stats["flux_std"] = df["flux"].apply(np.std) + eps
+        # Scale flux_err by the same per-spectrum std to preserve SNR
+        stats["flux_err_scale"] = stats["flux_std"]
+    else:
+        # Global statistics over all flux values in training data
+        all_flux = np.concatenate(df["flux"].values)
+        stats["flux_mean"] = np.mean(all_flux)
+        stats["flux_std"] = np.std(all_flux) + eps
 
-    # Flux error statistics
-    stats["flux_err_mean"] = df["flux_err"].mean()
-    stats["flux_err_std"] = df["flux_err"].std()
+        all_flux_err = np.concatenate(df["flux_err"].values)
+        stats["flux_err_mean"] = np.mean(all_flux_err)
+        stats["flux_err_std"] = np.std(all_flux_err) + eps
 
-    # Redshift statistics
+    # Redshift normalization (always global)
     stats["redshift_mean"] = df["redshift"].mean()
-    stats["redshift_std"] = df["redshift"].std()
-
-    # EBV statistics
-    stats["ebv_mean"] = df["ebv"].mean()
-    stats["ebv_std"] = df["ebv"].std()
+    stats["redshift_std"] = df["redshift"].std() + eps
 
     return stats
