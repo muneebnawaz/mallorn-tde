@@ -79,8 +79,8 @@ def load_dataset():
 
         return df
 
-    train_data = apply_de_extinction(train_data)
-    test_data = apply_de_extinction(test_data)
+    # train_data = apply_de_extinction(train_data) 
+    # test_data = apply_de_extinction(test_data)
 
     # Drop EBV since flux is now corrected
     train_data = train_data.drop(columns=["EBV"])

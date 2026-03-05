@@ -90,15 +90,38 @@ def fit_2d_gp_for_object(
     )
 
     # GP fitting
-    alpha = (yerr_scaled)**2
+    # Convert to arrays
+    X = np.asarray(X, dtype=float)
+    y_scaled = np.asarray(y_scaled, dtype=float)
+    yerr_scaled = np.asarray(yerr_scaled, dtype=float)
+
+    # Mask MUST apply to X, y, and yerr together
+    finite_mask = (
+        np.isfinite(X).all(axis=1)
+        & np.isfinite(y_scaled)
+        & np.isfinite(yerr_scaled)
+        & (yerr_scaled > 0)
+    )
+
+    X = X[finite_mask]
+    y_scaled = y_scaled[finite_mask]
+    yerr_scaled = yerr_scaled[finite_mask]
+
+    MIN_POINTS_FOR_GP = 10
+    if X.shape[0] < MIN_POINTS_FOR_GP:
+        return None
+
+    # alpha must match y length
+    alpha = np.square(np.clip(yerr_scaled, 1e-12, np.inf))
 
     gp = GaussianProcessRegressor(
         kernel=kernel,
-        alpha=np.square(np.clip(yerr_scaled, 1e-12, np.inf)),
+        alpha=alpha,
         normalize_y=False,
         n_restarts_optimizer=n_restarts_optimizer,
         random_state=random_state,
     )
+
     gp.fit(X, y_scaled)
 
     return GPFitResult(gp=gp, y_scale=y_scale, x_time0=t0, kernel=gp.kernel_)
@@ -122,11 +145,31 @@ def gp_predict (gp_res, t_mjd, filt, return_std=False):
 
 # Defining power-law decay
 def _powerlaw_model(dt, a, b):
-    return a * (dt + 1.0) ** b
+    dt = np.asarray(dt, dtype=float)
+    dt = np.clip(dt, 0.0, 1e4)  # keep base bounded
+
+    base = dt + 1.0
+
+    # Compute base**b as exp(b*log(base)) with clipping to prevent overflow
+    log_base = np.log(base)
+    expo = b * log_base
+    expo = np.clip(expo, -700.0, 700.0)  # exp(709) ~ 8e307 near float max
+
+    y = a * np.exp(expo)
+
+    # Ensure finite output (curve_fit will handle large values poorly otherwise)
+    y = np.where(np.isfinite(y), y, np.inf)
+    return y
 
 # TDE power-law error - Measures post-peak performance for TDE power-law decay
 def _tde_powerlaw_error(t, y):
-    peak_idx = int(np.argmax(y)) # find peak index (where flux is highest)
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if len(t) < 5 or not np.isfinite(y).any():
+        return np.nan
+
+    peak_idx = int(np.nanargmax(y))
 
     # keeping only post-peak part
     t_post = t[peak_idx:]
@@ -140,6 +183,12 @@ def _tde_powerlaw_error(t, y):
 
     # turn time into days since peak
     dt = t_post - t_post[0]
+    dt = np.asarray(dt, dtype=float)
+    dt = dt - np.nanmin(dt)  # ensure starts at 0 even if weirdness
+    dt = np.where(np.isfinite(dt), dt, 0.0)
+
+    if len(dt) < 5 or not np.isfinite(y_norm).all():
+        return np.nan
 
     # fit the power-law curve to (dt, y_norm)
     try:
@@ -147,15 +196,19 @@ def _tde_powerlaw_error(t, y):
             _powerlaw_model,
             dt,
             y_norm,
-            p0 = (1.0, -1.67),
-            maxfev = 20000
+            p0=(1.0, -1.67),
+            bounds=([0.0, -10.0], [5.0, 0.0]),  # a >= 0, b in [-10, 0]
+            maxfev=20000
         )
 
         # compute fitted curve and measure error
         y_fit = _powerlaw_model(dt, *popt)
+        if not np.isfinite(y_fit).all():
+            return np.inf
 
         # RMSE
-        err = np.sqrt(np.mean((y_norm - y_fit) ** 2))
+        resid = y_norm - y_fit
+        err = np.sqrt(np.nanmean(resid * resid))
         return float(err)
     
     except Exception:
@@ -192,6 +245,8 @@ def _template_chisq_tde(t, y):
 
 # Creating function to return basic curve shape features
 def _basic_morphology_features(t, y):
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
     out = {}
 
     if len(t) < 10 or not np.isfinite(y).any():
@@ -206,7 +261,10 @@ def _basic_morphology_features(t, y):
         }
     
     # Find peak
-    peak_idx = int(np.argmax(y))
+    try:
+        peak_idx = int(np.nanargmax(y))
+    except Exception:
+        peak_idx = 0
     y_peak = float(y[peak_idx])
     if not np.isfinite(y_peak) or y_peak <= 0:
         return {
@@ -236,7 +294,7 @@ def _basic_morphology_features(t, y):
     t_post = t [peak_idx:]
     try:
         below = np.where(post <= thr_1mag)[0]
-        fade_time = float(t_post[int(below[0])] - t_post[0]) if len(below) else float(t_post[0])
+        fade_time = float(t_post[int(below[0])] - t_post[0]) if len(below) else np.nan
     except Exception:
         fade_time = np.nan
 
@@ -250,7 +308,7 @@ def _basic_morphology_features(t, y):
 
     # Compactness of the peak = area / peak
     try:
-        area = float(np.trapz(np.maximum(y, 0,0), t))
+        area = float(np.trapz(np.maximum(y, 0.0), t))
         compactness = area / y_peak
     except Exception:
         compactness = np.nan
@@ -323,7 +381,17 @@ def extract_features_for_object(
             out["target"] = df_obj["target"].iloc[0]
 
     # Fitting GP for this object
-    gp_res = fit_2d_gp_for_object(df_obj, n_restarts_optimizer=gp_n_restarts)
+    try:
+        gp_res = fit_2d_gp_for_object(df_obj, n_restarts_optimizer=gp_n_restarts)
+    except Exception as e:
+        gp_res = None
+
+        # OPTIONAL (recommended during debugging / Step 0):
+        # record that GP failed for this object
+        out["gp_fit_ok"] = 0
+        out["gp_fit_error"] = str(e)[:200]
+    else:
+        out["gp_fit_ok"] = 1
     if gp_res is None:
         # Populate with NaNs so downstream model can handle missing
         out.update(
@@ -502,27 +570,37 @@ def extract_features_for_object(
         out["fwhm_rest"] = np.nan
         out["robust_duration_rest"] = np.nan
 
+    return out
+
 # Creating function to extacts features from all objects
-def build_feature_table(
-    df_lc,
-    df_meta=None,
-    object_ids=None,
-    n_jobs=-1,
-    gp_n_restarts=0,
-):
-    """
-    Build a one-row-per-object feature table from a long-format lightcurve dataframe.
-    """
+def build_feature_table(df_lc, df_meta=None, object_ids=None, n_jobs=-1, gp_n_restarts=0):
     if object_ids is None:
         object_ids = df_lc["object_id"].dropna().unique()
 
     feats = Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(extract_features_for_object)(
-            int(oid),
-            df_lc,
-            df_meta,
-            gp_n_restarts=gp_n_restarts,
+            oid, df_lc, df_meta, gp_n_restarts=gp_n_restarts
         )
         for oid in object_ids
     )
-    return pd.DataFrame(feats)
+
+    # --- DEBUG CHECKS (temporary) ---
+    print("feats type:", type(feats), "len:", len(feats))
+    bad_type = [(i, type(x)) for i, x in enumerate(feats) if not isinstance(x, dict)]
+    if bad_type:
+        print("Non-dict returns (first 10):", bad_type[:10])
+        # show a sample value
+        i0 = bad_type[0][0]
+        print("Example non-dict value:", feats[i0])
+        raise TypeError("extract_features_for_object returned non-dict")
+
+    missing_oid = [i for i, x in enumerate(feats) if "object_id" not in x]
+    if missing_oid:
+        print("Missing object_id in returns (first 10):", missing_oid[:10])
+        i0 = missing_oid[0]
+        print("Example missing object_id dict keys:", list(feats[i0].keys()))
+        raise KeyError("Some feature dicts missing 'object_id'")
+
+    df_feat = pd.DataFrame(feats)
+    print("Feature df columns (first 30):", list(df_feat.columns)[:30])
+    return df_feat
