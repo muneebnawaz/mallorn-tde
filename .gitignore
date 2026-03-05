@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# MALLORN dataset (DO NOT COMMIT)
+mallorn-astronomical-classification-challenge/
+
+# Optional extra safety
+*.csv
+
+# VSCode
+.vscode/
+
+# Debug outputs
+gp_*.png
+debug_features_*.csv
+
+# Local scratch
+code_file.py
