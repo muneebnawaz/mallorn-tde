@@ -6,63 +6,63 @@ import warnings
 from src.data.load_dataset import load_dataset
 from src.features.gp_feature_extraction import build_feature_table, fit_2d_gp_for_object, gp_predict, _get_flux_columns
 from sklearn.exceptions import ConvergenceWarning
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+warnings.filterwarnings("ignore", category=ConvergenceWarning, module="sklearn.gaussian_process")
 
 RANDOM_SEED = 42
-N_OBJECTS = 500
-
 def main():
     # 1) Load
-    data = load_dataset()
-
-    # --- Adjust these two lines to match what load_dataset() returns ---
-    # Common patterns: (train_lc, train_log, test_lc, test_log) OR dict
-    if isinstance(data, dict):
-        lcs = data.get("train_data") or data.get("train_lcs") or data.get("lightcurves")
-        log = data.get("train_log") or data.get("meta") or data.get("log")
-    else:
-        # fallback: assume first item is lightcurves, second is log/meta
-        lcs, log = data[0], data[1]
-
-    assert isinstance(lcs, pd.DataFrame), "Expected lightcurves dataframe"
-    assert "object_id" in lcs.columns, "lightcurves must contain object_id"
+    lcs, _, log, _ = load_dataset(debug_extinction=False, drop_ebv=False)
+    assert isinstance(lcs, pd.DataFrame)
 
     # 2) Sample objects
-    object_ids = lcs["object_id"].dropna().unique()
-    rng = np.random.default_rng(RANDOM_SEED)
-    sample_ids = rng.choice(object_ids, size=min(N_OBJECTS, len(object_ids)), replace=False)
+    object_ids = lcs["object_id"].unique()
 
-    lcs_small = lcs[lcs["object_id"].isin(sample_ids)].copy()
-
-    print(f"Loaded LCs: {len(lcs):,} rows | Small sample: {len(lcs_small):,} rows | Objects: {len(sample_ids)}")
+    lcs_all = lcs.copy()
+    print(f"Loaded LCs: {len(lcs):,} rows | Validation set: {len(lcs_all):,} rows | Objects: {len(object_ids)}")
 
     # 3) Build features (this is the core integration test)
-    feat = build_feature_table(lcs_small, n_jobs=-1)
+    feat = build_feature_table(lcs_all, df_meta=log, n_jobs=-1)
     assert isinstance(feat, pd.DataFrame), "build_feature_table must return a DataFrame"
-    assert "object_id" in feat.columns, "feature table must contain object_id"
 
     print("\nFeature table shape:", feat.shape)
     print("Feature columns:", len(feat.columns) - 1)
 
-    print("\nGP fit ok rate:", feat["gp_fit_ok"].mean())
+    fade_nan_rate = float(feat["fade_time"].isna().mean())
+    print("\nfade_time NaN rate:", fade_nan_rate)
 
-    mask_ok = feat["gp_fit_ok"] == 1
-    fade_nan_rate_ok = feat.loc[mask_ok, "fade_time"].isna().mean()
-    print("fade_time NaN rate (gp_fit_ok==1):", fade_nan_rate_ok)
+    fade_cens = feat["fade_censored"]
+    print("Fade censoring:")
+    print(fade_cens.value_counts(dropna=False).to_string())
 
-    color_cols = ["mean_color_gr", "std_color_gr", "color_cooling_rate"]
+    exact_rate = float((fade_cens == 0).mean())
+    cens_rate  = float((fade_cens == 1).mean())
+    unavail_rate = float(fade_cens.isna().mean())
+    print(f"  exact_rate (0): {exact_rate:.3f}")
+    print(f"  censored_rate (1): {cens_rate:.3f}")
+    print(f"  unavailable_rate (NaN): {unavail_rate:.3f}")
+
+    # Non-negativity sanity
+    min_fade = feat["fade_time"].min(skipna=True)
+    print("  min fade_time (should be >= 0):", float(min_fade) if pd.notna(min_fade) else np.nan)
+
+    # Example 5 censored objects
+    cens_ids = feat.loc[feat["fade_censored"] == 1, "object_id"].head(5).tolist()
+    print("  example censored object_ids (first 5):", cens_ids)
+
+    color_cols = ["mean_color_gr", "std_color_gr", "gr_change_mid"]
+    print("\n")
     for c in color_cols:
-        rate = feat.loc[mask_ok, c].isna().mean()
-        print(f"{c} NaN rate (gp_fit_ok==1): {rate}")
+        rate = float(feat[c].isna().mean())
+        print(f"{c} NaN rate: {rate}")
 
     # 4) NaN rate summary
     nan_rate = feat.drop(columns=["object_id"]).isna().mean().sort_values(ascending=False)
-    print("\nTop NaN-rate features (first 30):")
-    print(nan_rate.head(30).to_string())
+    print("\nTop NaN-rate features:")
+    print(nan_rate.to_string())
 
     # Pick objects for spot checks
-    X = feat.drop(columns=["object_id"])
-    row_nan = X.isna().mean(axis=1)
+    row_nan = feat.drop(columns=["object_id"]).isna().mean(axis=1)
 
     best_i = row_nan.idxmin()
     worst_i = row_nan.idxmax()
@@ -72,7 +72,8 @@ def main():
     worst_id = feat.loc[worst_i, "object_id"]
     med_id = feat.loc[med_i, "object_id"]
 
-    print("\nBest:", best_id, "NaN rate:", float(row_nan.loc[best_i]))
+    print("\nObjects with best, worst and medinal NaN rates:")
+    print("Best:", best_id, "NaN rate:", float(row_nan.loc[best_i]))
     print("Worst:", worst_id, "NaN rate:", float(row_nan.loc[worst_i]))
     print("Median:", med_id, "NaN rate:", float(row_nan.loc[med_i]))
 
@@ -83,9 +84,6 @@ def main():
     print("\nWorst object missing columns:", missing_cols)
     print("\nWorst object row (all columns):")
     print(worst_row.to_string())
-
-    print("\nWorst gp_fit_ok:", int(worst_row.get("gp_fit_ok", -1)))
-    print("Worst gp_fit_error:", worst_row.get("gp_fit_error", None))
 
     def summarize_lc(df_lc, oid):
         df = df_lc[df_lc["object_id"] == oid]
@@ -116,9 +114,9 @@ def main():
         else:
             print("  flux_err finite rate: n/a (no 'flux_err' column)")
 
-    summarize_lc(lcs_small, best_id)
-    summarize_lc(lcs_small, worst_id)
-    summarize_lc(lcs_small, med_id)
+    summarize_lc(lcs_all, best_id)
+    summarize_lc(lcs_all, worst_id)
+    summarize_lc(lcs_all, med_id)
 
     # === GP sanity check on the best object ===
     def gp_sanity_check(df_lc, oid, band="g", grid_points=100):
@@ -126,9 +124,6 @@ def main():
         gp_res = fit_2d_gp_for_object(df_obj, n_restarts_optimizer=0)
 
         print(f"\nGP sanity check: oid={oid}, band={band}")
-        if gp_res is None:
-            print("  GP fit returned None")
-            return
 
         t_obs = df_obj["Time (MJD)"].to_numpy(float)
         t_grid = np.linspace(np.nanmin(t_obs), np.nanmax(t_obs), grid_points).astype(float)
@@ -143,14 +138,11 @@ def main():
         print("  pred min/median/max:", float(np.nanmin(y_pred)), float(np.nanmedian(y_pred)), float(np.nanmax(y_pred)))
         print("  std  min/median/max:", float(np.nanmin(y_std)), float(np.nanmedian(y_std)), float(np.nanmax(y_std)))
 
-    gp_sanity_check(lcs_small, best_id, band="g")
+    gp_sanity_check(lcs_all, best_id, band="g")
 
     def plot_gp_fit_one_band(df_lc, oid, band="g", grid_points=200, out_png="gp_debug.png"):
         df_obj = df_lc[df_lc["object_id"] == oid].copy()
         gp_res = fit_2d_gp_for_object(df_obj, n_restarts_optimizer=0)
-        if gp_res is None:
-            print(f"Plot skipped: GP fit None for {oid}")
-            return
 
         # Extract observed arrays
         t_obs = df_obj["Time (MJD)"].to_numpy(float)
@@ -171,20 +163,31 @@ def main():
         plt.errorbar(t_b, y_b, yerr=e_b, fmt=".", capsize=0)
         plt.plot(t_grid, y_pred)
         plt.fill_between(t_grid, y_pred - y_std, y_pred + y_std, alpha=0.2)
+        if np.isfinite(y_pred).any():
+            ypk = float(np.nanmax(y_pred))
+            thr = ypk / 2.512
+            plt.axhline(thr, linestyle="--", linewidth=1)
+            plt.text(t_grid[0], thr, "1mag below peak", va="bottom", fontsize=8)
         plt.title(f"{oid} | band={band}")
         plt.xlabel("Time (MJD)")
-        plt.ylabel("Flux (scaled space)")
+        plt.ylabel("Flux")
         plt.tight_layout()
         plt.savefig(out_png, dpi=150)
         plt.close()
         print(f"Saved plot: {out_png}")
 
     # ✅ CALLS GO HERE (still indented inside main(), but NOT inside the function)
-    plot_gp_fit_one_band(lcs_small, best_id, band="g", out_png="gp_500_best_g.png")
-    plot_gp_fit_one_band(lcs_small, best_id, band="r", out_png="gp_500_best_r.png")
+    plot_gp_fit_one_band(lcs_all, best_id, band="g", out_png="gp_best_g.png")
+    plot_gp_fit_one_band(lcs_all, best_id, band="r", out_png="gp_best_r.png")
 
-    plot_gp_fit_one_band(lcs_small, worst_id, band="g", out_png="gp_500_worst_g.png")
-    plot_gp_fit_one_band(lcs_small, worst_id, band="r", out_png="gp_500_worst_r.png")
+    plot_gp_fit_one_band(lcs_all, worst_id, band="g", out_png="gp_worst_g.png")
+    plot_gp_fit_one_band(lcs_all, worst_id, band="r", out_png="gp_worst_r.png")
+
+    # Plot a censored example if available
+    if len(cens_ids) > 0:
+        cid = cens_ids[0]
+        plot_gp_fit_one_band(lcs_all, cid, band="g", out_png="gp_censored_g.png")
+        plot_gp_fit_one_band(lcs_all, cid, band="r", out_png="gp_censored_r.png")
 
 
     # 5) Per-object NaN distribution
@@ -193,8 +196,8 @@ def main():
     print(row_nan.describe().to_string())
 
     # 6) Dump a small CSV for inspection
-    feat.to_csv("debug_features_500.csv", index=False)
-    print("\nWrote debug_features_500.csv")
+    feat.to_csv("debug_features.csv", index=False)
+    print("\nWrote debug_features.csv")
 
 if __name__ == "__main__":
     main()

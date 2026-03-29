@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import warnings
 
 from joblib import Parallel, delayed
 
@@ -11,6 +12,12 @@ from scipy.optimize import curve_fit
 
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
+from sklearn.exceptions import ConvergenceWarning
+
+warnings.filterwarnings(
+    "ignore",
+    category=ConvergenceWarning
+)
 
 # Defining Filter Wavelengths
 FILTER_WAVELENGTHS = {
@@ -367,52 +374,8 @@ def extract_features_for_object(
         if "target" in row.columns:
             out["target"] = row.iloc[0]["target"]
 
-    # Fitting GP for this object
-    try:
-        gp_res = fit_2d_gp_for_object(df_obj, n_restarts_optimizer=gp_n_restarts)
-    except Exception as e:
-        gp_res = None
-
-        # OPTIONAL (recommended during debugging / Step 0):
-        # record that GP failed for this object
-        out["gp_fit_ok"] = 0
-        out["gp_fit_error"] = str(e)[:200]
-    else:
-        out["gp_fit_ok"] = 1
-    if gp_res is None:
-        # Populate with NaNs so downstream model can handle missing
-        out.update(
-            ls_time=np.nan,
-            ls_wave=np.nan,
-            amplitude=np.nan,
-            reduced_chi_square=np.nan,
-            negative_flux_fraction=np.nan,
-            duty_cycle=np.nan,
-            robust_duration=np.nan,
-            template_error_tde=np.nan,
-            tde_power_law_error=np.nan,
-            log_tde_error=np.nan,
-            flux_skew=np.nan,
-            flux_kurtosis=np.nan,
-            ug_peak=np.nan,
-            gr_peak=np.nan,
-            ur_peak=np.nan,
-            mean_color_gr=np.nan,
-            std_color_gr=np.nan,
-            color_cooling_rate=np.nan,
-            rise_time=np.nan,
-            fade_time=np.nan,
-            fwhm=np.nan,
-            compactness=np.nan,
-            percentile_ratio_80_max=np.nan,
-            percentile_ratio_20_50=np.nan,
-            baseline_ratio=np.nan,
-            rise_time_rest=np.nan,
-            fade_time_rest=np.nan,
-            fwhm_rest=np.nan,
-            robust_duration_rest=np.nan,
-        )
-        return out
+    # Fitting GP for this object   
+    gp_res = fit_2d_gp_for_object(df_obj, n_restarts_optimizer=gp_n_restarts)
     
     # learned kernel parameters
     try:
@@ -561,11 +524,11 @@ def extract_features_for_object(
     return out
 
 # Creating function to extacts features from all objects
-def build_feature_table(df_lc, df_meta=None, object_ids=None, n_jobs=-1, gp_n_restarts=0):
+def build_feature_table(df_lc, df_meta=None, object_ids=None, n_jobs=-1, gp_n_restarts=0, verbose=0):
     if object_ids is None:
         object_ids = df_lc["object_id"].unique()
 
-    feats = Parallel(n_jobs=n_jobs, verbose=10)(
+    feats = Parallel(n_jobs=n_jobs, verbose=verbose)(
         delayed(extract_features_for_object)(
             oid, df_lc, df_meta, gp_n_restarts=gp_n_restarts
         )
